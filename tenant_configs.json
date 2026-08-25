@@ -1,0 +1,26 @@
+{
+  "tenant-123": {
+    "tenant_id": "tenant-123",
+    "siem_type": "splunk",
+    "webhook_url": "http://httpbin.org/post",
+    "auth_token": "mock-splunk-token"
+  },
+  "tenant-999": {
+    "tenant_id": "tenant-999",
+    "siem_type": "sentinel",
+    "webhook_url": "http://httpbin.org/post",
+    "auth_token": "mock-sentinel-token"
+  },
+  "qZGVg501KZZFF6364HVGWN5CACKZDFB4": {
+    "tenant_id": "qZGVg501KZZFF6364HVGWN5CACKZDFB4",
+    "siem_type": "splunk",
+    "webhook_url": "http://httpbin.org/post",
+    "auth_token": "mock-splunk-token"
+  },
+  "092e42664e82463ebbdeef20a27095f4": {
+    "tenant_id": "092e42664e82463ebbdeef20a27095f4",
+    "siem_type": "elastic",
+    "webhook_url": "http://httpbin.org/post",
+    "auth_token": "mock-elastic-token"
+  }
+}
