@@ -7,19 +7,20 @@ canonical OCSF "DNS Activity" (class 4003) alert that the Data Plane delivers
 to customer SIEMs. It knows nothing about where a document came from.
 
 Every source exposes the same contract: a callable or generator that yields
-raw documents as ``dict`` objects. Today that source is a static OpenSearch
-CSV export (``iter_export_csv``) used for the sample and local demos.
+raw documents as ``dict`` objects. Two sources exist today: a static
+OpenSearch CSV export (``iter_export_csv``, used by the CLI/tests) and the
+real internal ClickHouse data API (``iter_api_stream``, used by the live
+dashboard). Nothing downstream changes between them:
 
-FUTURE CONTINUOUS FEED (documented seam)
-----------------------------------------
-The production feed will be a continuous stream consumed via an API key. When
-the endpoint contract is known, add a source adapter here with the SAME shape
-as ``iter_export_csv`` -- e.g. ``iter_api_stream(endpoint, api_key)`` -- that
-yields raw ECS documents. Nothing downstream changes:
-
-    for raw_doc in iter_api_stream(endpoint, api_key):   # or iter_export_csv(...)
-        alert = normalize_to_ocsf(raw_doc)               # pure, source-agnostic
+    for raw_doc in iter_api_stream(base_url, api_key):   # or iter_export_csv(...)
+        alert = normalize_to_ocsf(raw_doc)                # pure, source-agnostic
         ...
+
+``iter_api_stream`` is a bounded, rate-limited pull of one day's slice of
+real DNS log data -- proof that the pipeline can connect to and normalize
+the real data source, not a production-grade continuous/checkpointed tail.
+Freshness, query performance at scale, and pagination are all backend-side
+concerns, out of scope here by explicit instruction (see its docstring).
 
 ``normalize_to_ocsf`` is deliberately pure: no I/O, no state, no source
 dependency. It accepts both the flat ECS dotted shape used by the real
@@ -30,9 +31,12 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
+
+import requests
 
 
 DEFAULT_EXPORT_CSV = Path.home() / "Downloads" / "opensearch_export_2026-08-21.csv"
@@ -186,6 +190,133 @@ def iter_export_csv(path: Path = DEFAULT_EXPORT_CSV, *, limit: int | None = None
             if limit is not None and index >= limit:
                 break
             yield json.loads(row["_source"])
+
+
+DEFAULT_CLICKHOUSE_DATABASE = "intellibron_aman_silver"
+DEFAULT_CLICKHOUSE_TABLE = "dns_request_parsed"
+
+
+def _clickhouse_row_to_raw_doc(row: dict[str, Any]) -> dict[str, Any]:
+    """Map one ``dns_request_parsed`` row onto the flat ECS-dotted shape
+    ``normalize_to_ocsf`` already expects from the real OpenSearch export --
+    no changes needed downstream for this new source.
+    """
+    return {
+        "@timestamp": row.get("timestamp"),
+        "subscriber.id": row.get("user_id"),
+        "destination.domain": row.get("destination_domain"),
+        "destination.blocked": row.get("destination_blocked"),
+        "rule.category": row.get("rule_category") or "benign",
+        "dns.question.type": row.get("dns_question_types"),
+        "source.ip": row.get("source_ip"),
+        "destination.ip": row.get("destination_ip"),
+    }
+
+
+def iter_api_stream(
+    base_url: str,
+    api_key: str,
+    *,
+    database: str = DEFAULT_CLICKHOUSE_DATABASE,
+    table: str = DEFAULT_CLICKHOUSE_TABLE,
+    dt: str | None = None,
+    limit: int = 10,
+    rate: float = 5.0,
+) -> Iterator[dict[str, Any]]:
+    """Yield raw DNS request documents from the ITSEC ClickHouse Data API.
+
+    Proof-of-connectivity source, not a production continuous feed: real
+    historical data (not synthetic), pulled as one bounded slice and
+    replayed at a simple fixed rate. Three things are explicitly deferred,
+    not solved here -- all backend/data-source concerns, not this pipeline's
+    call to make:
+
+    - **Freshness.** The freshest row currently available is real but
+      already ~18 days old -- there is no live tail.
+    - **Query performance at any real scale.** Direct testing found a hard
+      cliff: `limit=5` on this endpoint returns in ~5s, `limit=20` reliably
+      times out at 30s, both against the exact same dt-filtered day. That
+      isn't this code being inefficient -- it's the API/ClickHouse side not
+      short-circuiting on LIMIT the way you'd expect, on a table already
+      known (per direct testing) to time out on an unfiltered
+      `min/max(timestamp)` scan at 34M+ rows. The default here (10) sits
+      comfortably inside the fast zone; raising it is a backend-side
+      performance problem to hand off, not something to keep tuning around
+      here.
+    - **Throughput/pagination.** This pulls a single page. Continuous
+      consumption of the full 34M+ row table (checkpointing, cursor-based
+      pagination past one page) is a later problem for whoever owns that
+      scale.
+
+    Filtered by the ``dt`` partition column rather than scanning the whole
+    table, and deliberately has no ``ORDER BY`` (sorting a single day's slice
+    hit the same timeout class). Defaults to the most recent available day
+    if ``dt`` isn't given.
+    """
+    headers = {"x-api-key": api_key}
+
+    if dt is None:
+        dt_rows = _clickhouse_query(
+            base_url, headers, f"SELECT max(dt) AS max_dt FROM {database}.{table}", limit=1,
+        )
+        dt = dt_rows[0]["max_dt"]
+
+    # No ORDER BY: a single day is still large enough (34M rows / ~6 weeks of
+    # data) that sorting it timed out in direct testing, same shape as the
+    # unfiltered min/max(timestamp) timeout this project already hit once.
+    # Ordering isn't needed for proving connectivity -- chronological replay
+    # is exactly the "later, backend's call" scope this function explicitly
+    # defers (see docstring).
+    #
+    # destination_blocked = true is also load-bearing, not just an optimization:
+    # without it, an unordered LIMIT against an immutable partition returns the
+    # *same* fixed rows on every stream restart (verified directly), and
+    # should_deliver_event drops every non-blocked one downstream anyway. On
+    # the live day tested, the first 10 unfiltered rows happened to contain
+    # zero blocked events, so the whole demo silently delivered nothing forever
+    # -- looked like a dead stream, wasn't. Filtering here guarantees every
+    # row pulled is one the rest of the pipeline will actually act on.
+    sql = f"SELECT * FROM {database}.{table} WHERE dt = '{dt}' AND destination_blocked = true"
+    rows = _clickhouse_query(base_url, headers, sql, limit=limit)
+
+    interval = 1.0 / rate if rate > 0 else 0
+    for row in rows:
+        yield _clickhouse_row_to_raw_doc(row)
+        if interval:
+            time.sleep(interval)
+
+
+def _clickhouse_query(
+    base_url: str, headers: dict[str, str], sql: str, *, limit: int, retries: int = 2,
+) -> list[dict[str, Any]]:
+    """POST one query, retrying transient timeouts.
+
+    This endpoint's response time is inconsistent in practice -- the exact
+    same query and row count succeeded in ~5s on one call and timed out at
+    30s on another. That's a backend/data-source reliability problem this
+    pipeline doesn't own (see iter_api_stream's docstring); retrying here is
+    just not letting a single slow response kill the whole ingest loop, the
+    same retry-on-transient-failure posture orchestrator.py already applies
+    to outbound deliveries.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            response = requests.post(
+                f"{base_url}/api/v1/query",
+                headers=headers,
+                json={"sql": sql, "limit": limit},
+                timeout=30,
+            )
+            response.raise_for_status()
+            break
+        except requests.exceptions.RequestException as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1)
+    else:
+        raise last_exc
+    return response.json()["rows"]
 
 
 if __name__ == "__main__":

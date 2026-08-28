@@ -16,6 +16,8 @@ SUPPORTED_SIEMS = {
     "datadog",
     "sumologic",
     "crowdstrike",
+    "graylog",
+    "wazuh",
     "generic",
 }
 
@@ -31,12 +33,17 @@ def normalize_siem_type(siem_type: str | None) -> str:
 
 
 def validate_webhook_url(webhook_url: str) -> str:
-    """Validate and return a clean HTTP webhook URL."""
+    """Validate and return a clean webhook/target URL.
+
+    ``syslog://host:port`` is accepted alongside http(s) -- it addresses a
+    UDP socket, not an HTTP endpoint, but it's still "where this tenant's
+    alerts go" and lives in the same field for that reason.
+    """
     cleaned_url = (webhook_url or "").strip()
     parsed = urlparse(cleaned_url)
 
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigError("Webhook URL must be a valid http:// or https:// URL")
+    if parsed.scheme not in {"http", "https", "syslog"} or not parsed.netloc:
+        raise ConfigError("Webhook URL must be a valid http://, https://, or syslog:// URL")
 
     return cleaned_url
 
@@ -59,6 +66,9 @@ def normalize_config(raw_config: dict[str, Any]) -> dict[str, str]:
         "siem_type": normalize_siem_type(str(raw_config.get("siem_type", "generic"))),
         "webhook_url": validate_webhook_url(str(raw_config.get("webhook_url", ""))),
         "auth_token": auth_token,
+        # Self-hosted SIEMs (e.g. Wazuh's bundled indexer) commonly run on a
+        # self-signed cert -- default true (verify) and let a tenant opt out.
+        "verify_ssl": bool(raw_config.get("verify_ssl", True)),
     }
 
 

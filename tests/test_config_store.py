@@ -59,6 +59,24 @@ class ConfigStoreTests(unittest.TestCase):
                 path=config_path,
             )
 
+    def test_save_tenant_config_accepts_syslog_url(self) -> None:
+        config_path = Path(self.id().replace(".", "_") + ".json")
+        self.addCleanup(config_path.unlink, missing_ok=True)
+
+        saved = save_tenant_config(
+            {
+                "tenant_id": "tenant-123",
+                "siem_type": "wazuh",
+                "webhook_url": "syslog://10.2.10.200:514",
+                "auth_token": "unused",
+                "verify_ssl": False,
+            },
+            path=config_path,
+        )
+
+        self.assertEqual(saved["webhook_url"], "syslog://10.2.10.200:514")
+        self.assertFalse(saved["verify_ssl"])
+
     def test_load_tenant_configs_is_cached_until_file_changes(self) -> None:
         config_path = Path(self.id().replace(".", "_") + ".json")
         self.addCleanup(config_path.unlink, missing_ok=True)

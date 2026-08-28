@@ -30,19 +30,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlparse
 
 import requests
 
 from config_store import load_tenant_configs
 from data_generator import generate_opensearch_logs
 from ingest import DEFAULT_EXPORT_CSV, iter_export_csv, normalize_to_ocsf
-from translator import BATCHABLE_SIEMS, format_batch_for_siem, format_for_siem
+from translator import (
+    BATCHABLE_SIEMS,
+    NDJSON_BULK_SIEMS,
+    format_batch_for_siem,
+    format_for_siem,
+    format_for_syslog,
+)
 
 
 CONFIG_FILE = Path("tenant_configs.json")
@@ -53,8 +61,26 @@ DEFAULT_BATCH_SIZE = 10
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_RETRIES = 2
 BACKOFF_BASE_SECONDS = 0.5
+SYSLOG_DEFAULT_PORT = 514
 
 PostFunc = Callable[..., Any]
+SyslogSendFunc = Callable[[str, str], None]
+
+
+def send_syslog_udp(webhook_url: str, message: str) -> None:
+    """Fire-and-forget one syslog line at a `syslog://host:port` target.
+
+    UDP has no delivery confirmation at the protocol level -- a successful
+    call here means the local kernel accepted the datagram for
+    transmission, nothing more. Whether the destination received or parsed
+    it is unknowable from the sender's side; that's a deliberate tradeoff
+    (simplicity/universal compatibility over guaranteed delivery), not an
+    oversight. See deliver_batch's status_code handling for the syslog case.
+    """
+    parsed = urlparse(webhook_url)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(REQUEST_TIMEOUT_SECONDS)
+        sock.sendto(message.encode("utf-8"), (parsed.hostname, parsed.port or SYSLOG_DEFAULT_PORT))
 
 
 @dataclass
@@ -74,6 +100,7 @@ class DeliveryAttempt:
     headers: dict[str, str]
     payload: Any
     alert: dict[str, Any]
+    verify: bool = True
     status_code: int | None = None
     error: str | None = None
 
@@ -97,6 +124,7 @@ class DeliveryBatch:
     headers: dict[str, str]
     payload: Any
     attempts: list[DeliveryAttempt]
+    verify: bool = True
     status_code: int | None = None
     error: str | None = None
     retries: int = 0
@@ -159,12 +187,21 @@ def prepare_delivery_attempt(
 ) -> DeliveryAttempt:
     """Envelope the canonical alert for the tenant's SIEM target."""
     siem_type = tenant_config.get("siem_type", "generic")
-    headers, payload = format_for_siem(alert, siem_type, tenant_config.get("auth_token", ""))
-    headers = {
-        **headers,
-        "Content-Type": "application/json",
-        "X-Aman-Tenant-ID": tenant_config["tenant_id"],
-    }
+    webhook_url = tenant_config["webhook_url"]
+
+    if urlparse(webhook_url).scheme == "syslog":
+        # Plain syslog has no HTTP envelope and no auth mechanism -- the
+        # network path is the only access control, so there's nothing to
+        # put in headers.
+        headers: dict[str, str] = {}
+        payload = format_for_syslog(alert, siem_type)
+    else:
+        headers, payload = format_for_siem(alert, siem_type, tenant_config.get("auth_token", ""))
+        headers = {
+            **headers,
+            "Content-Type": "application/json",
+            "X-Aman-Tenant-ID": tenant_config["tenant_id"],
+        }
 
     return DeliveryAttempt(
         tenant_id=tenant_config["tenant_id"],
@@ -175,6 +212,7 @@ def prepare_delivery_attempt(
         headers=headers,
         payload=payload,
         alert=alert,
+        verify=tenant_config.get("verify_ssl", True),
     )
 
 
@@ -186,19 +224,37 @@ def build_batch(attempts: list[DeliveryAttempt]) -> DeliveryBatch:
     envelope for the tenant's SIEM via the translator.
     """
     first = attempts[0]
+    headers = first.headers
+    is_syslog = urlparse(first.webhook_url).scheme == "syslog"
 
-    if len(attempts) == 1:
+    # elastic/wazuh need the NDJSON bulk *body* even for a single alert --
+    # unlike splunk/sentinel/datadog, a lone alert isn't valid on its own at
+    # a `_bulk` endpoint, it's a different wire shape, not just a shorter
+    # list. Everything else keeps its already-formatted single envelope.
+    # Syslog is never batched regardless of siem_type -- one alert is one
+    # datagram, by convention (RFC 5426), and prepare_delivery_attempt
+    # already built the right compact body for it.
+    if is_syslog or (len(attempts) == 1 and first.siem_type not in NDJSON_BULK_SIEMS):
         payload = first.payload
     else:
         _, payload = format_batch_for_siem([a.alert for a in attempts], first.siem_type, "")
+        if isinstance(payload, str):
+            # Elastic/wazuh's batched payload is a raw NDJSON body, not a
+            # JSON object -- override the single-alert Content-Type
+            # accordingly. Auth stays from first.headers (format_batch_for_siem
+            # gets an empty auth_token here since the real token is already
+            # baked into first.headers from the single-alert format_for_siem
+            # call).
+            headers = {**first.headers, "Content-Type": "application/x-ndjson"}
 
     return DeliveryBatch(
         tenant_id=first.tenant_id,
         siem_type=first.siem_type,
         webhook_url=first.webhook_url,
-        headers=first.headers,
+        headers=headers,
         payload=payload,
         attempts=list(attempts),
+        verify=first.verify,
     )
 
 
@@ -221,37 +277,107 @@ def group_into_batches(
         grouped.setdefault(key, []).append(attempt)
 
     batches: list[DeliveryBatch] = []
-    for (tenant_id, siem_type, _url), group_attempts in grouped.items():
-        chunk_size = batch_size if siem_type in BATCHABLE_SIEMS else 1
+    for (tenant_id, siem_type, url), group_attempts in grouped.items():
+        # Same siem_type can be reached over two different transports (e.g.
+        # wazuh's bulk API vs. wazuh over syslog) with different batching
+        # rules -- syslog is never batched, regardless of what the HTTP
+        # transport for that same siem_type would allow.
+        if urlparse(url).scheme == "syslog":
+            chunk_size = 1
+        else:
+            chunk_size = batch_size if siem_type in BATCHABLE_SIEMS else 1
         for start in range(0, len(group_attempts), chunk_size):
             batches.append(build_batch(group_attempts[start : start + chunk_size]))
 
     return batches
 
 
+def _first_bulk_item_error(response: Any) -> str | None:
+    """Return the first per-item error from a Bulk API response, if any.
+
+    A 2xx status only means the HTTP request itself was well-formed; each
+    item in the bulk body succeeds or fails independently, and a failure
+    (a mapping conflict, a malformed document) only shows up in the
+    response body's ``errors``/``items`` fields, never in the status code.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not body.get("errors"):
+        return None
+    for item in body.get("items", []):
+        action_result = next(iter(item.values()), {})
+        if action_result.get("error"):
+            return str(action_result["error"])
+    return "unspecified bulk item error"
+
+
 def deliver_batch(
     batch: DeliveryBatch,
     *,
     post_func: PostFunc = requests.post,
+    send_syslog: SyslogSendFunc = send_syslog_udp,
     retries: int = DEFAULT_RETRIES,
     backoff_base: float = BACKOFF_BASE_SECONDS,
 ) -> DeliveryBatch:
-    """POST one batch with retry + exponential backoff; returns it with status."""
+    """Deliver one batch with retry + exponential backoff; returns it with status.
+
+    Scheme decides the transport, not payload type -- elastic/wazuh's bulk
+    NDJSON and wazuh/graylog's syslog body are both plain strings, but one
+    goes out as an HTTP POST and the other as a raw UDP datagram.
+    """
+    is_syslog = urlparse(batch.webhook_url).scheme == "syslog"
+
     for attempt_number in range(retries + 1):
         try:
-            response = post_func(
-                batch.webhook_url,
-                headers=batch.headers,
-                json=batch.payload,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            if is_syslog:
+                send_syslog(batch.webhook_url, batch.payload)
+            elif isinstance(batch.payload, str):
+                # Elastic/wazuh bulk NDJSON: a preformatted raw body. Must
+                # use data=, not json= -- json= would re-serialize the
+                # string as a single JSON value and destroy the
+                # newline-delimited record structure the Bulk API parses on.
+                response = post_func(
+                    batch.webhook_url,
+                    headers=batch.headers,
+                    data=batch.payload.encode("utf-8"),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    verify=batch.verify,
+                )
+            else:
+                response = post_func(
+                    batch.webhook_url,
+                    headers=batch.headers,
+                    json=batch.payload,
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    verify=batch.verify,
+                )
         except Exception as exc:  # network layer: any failure is retryable
             error = exc.__class__.__name__
         else:
-            if 200 <= response.status_code < 300:
-                batch.status_code = response.status_code
+            if is_syslog:
+                # UDP: the send succeeding only means the local kernel
+                # accepted the datagram -- there is no delivery confirmation
+                # to report. 0 is a sentinel, not a real status code.
+                batch.status_code = 0
                 return batch
-            error = f"HTTP {response.status_code}"
+            if 200 <= response.status_code < 300:
+                # Elastic/wazuh's Bulk API can return HTTP 200 while
+                # individual documents were rejected (e.g. a field-type
+                # mapping conflict) -- that per-item result only shows up in
+                # the response body, never in the status code. Hit this for
+                # real: a "time" field mapping conflict silently dropped
+                # documents that this exact check would have caught.
+                bulk_error = (
+                    _first_bulk_item_error(response) if isinstance(batch.payload, str) else None
+                )
+                if bulk_error is None:
+                    batch.status_code = response.status_code
+                    return batch
+                error = f"Bulk item error: {bulk_error}"
+            else:
+                error = f"HTTP {response.status_code}"
 
         batch.retries += 1
         if attempt_number < retries:
@@ -280,6 +406,7 @@ def deliver_concurrently(
     batches: list[DeliveryBatch],
     *,
     post_func: PostFunc = requests.post,
+    send_syslog: SyslogSendFunc = send_syslog_udp,
     max_workers: int = DEFAULT_MAX_WORKERS,
     retries: int = DEFAULT_RETRIES,
 ) -> None:
@@ -295,7 +422,7 @@ def deliver_concurrently(
 
     def deliver_group(group_batches: list[DeliveryBatch]) -> None:
         for batch in group_batches:
-            deliver_batch(batch, post_func=post_func, retries=retries)
+            deliver_batch(batch, post_func=post_func, send_syslog=send_syslog, retries=retries)
 
     worker_count = min(len(groups), max_workers) if groups else 0
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -310,6 +437,7 @@ def run_pipeline(
     *,
     send: bool = True,
     post_func: PostFunc = requests.post,
+    send_syslog: SyslogSendFunc = send_syslog_udp,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_workers: int = DEFAULT_MAX_WORKERS,
     retries: int = DEFAULT_RETRIES,
@@ -350,6 +478,7 @@ def run_pipeline(
         deliver_concurrently(
             batches,
             post_func=post_func,
+            send_syslog=send_syslog,
             max_workers=max_workers,
             retries=retries,
         )

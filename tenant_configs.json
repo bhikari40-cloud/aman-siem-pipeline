@@ -22,5 +22,33 @@
     "siem_type": "elastic",
     "webhook_url": "http://httpbin.org/post",
     "auth_token": "mock-elastic-token"
+  },
+  "test-annie-elk": {
+    "tenant_id": "test-annie-elk",
+    "siem_type": "elastic",
+    "webhook_url": "http://10.2.10.200:9201/aman-live-test/_bulk",
+    "auth_token": "mock-elastic-token",
+    "_note": "Real Elasticsearch API key (xpack.security enabled 2026-08-27, write-only scope on aman-live-test) kept out of git -- set locally, not committed."
+  },
+  "test-annie-graylog": {
+    "tenant_id": "test-annie-graylog",
+    "siem_type": "graylog",
+    "webhook_url": "syslog://10.2.10.200:1514",
+    "auth_token": "unused-syslog-has-no-auth",
+    "_note": "On syslog because it's more compact for UDP, not because GELF-HTTP was broken -- an earlier 'GELF silently drops alerts' finding was retracted, it was a flawed OpenSearch phrase-query check on my end, not a real Graylog defect."
+  },
+  "test-annie-wazuh": {
+    "tenant_id": "test-annie-wazuh",
+    "siem_type": "wazuh",
+    "webhook_url": "https://10.2.10.200:9202/aman-live-test/_bulk",
+    "auth_token": "mock-wazuh-token",
+    "verify_ssl": false,
+    "_note": "Real basic-auth password kept out of git -- set locally, not committed."
+  },
+  "test-annie-wazuh-syslog": {
+    "tenant_id": "test-annie-wazuh-syslog",
+    "siem_type": "wazuh",
+    "webhook_url": "syslog://10.2.10.200:514",
+    "auth_token": "unused-syslog-has-no-auth"
   }
 }
