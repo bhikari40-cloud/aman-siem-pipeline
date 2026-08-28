@@ -2,3 +2,18 @@ __pycache__/
 *.pyc
 .DS_Store
 dead_letter_queue.jsonl
+
+# save_tenant_config/onboarding_store create a sibling *.lock file next to
+# whatever path they're given (including test fixtures' throwaway paths) --
+# never meaningful to commit.
+*.lock
+
+# Live onboarding-link credentials -- unlike tenant_configs.json's scrubbed
+# placeholder secrets, these are real single-use capability tokens and must
+# never enter git history.
+onboarding_tokens.json
+
+# Node
+node_modules/
+dist/
+

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -142,18 +145,50 @@ def load_tenant_configs(path: Path = CONFIG_FILE) -> dict[str, dict[str, str]]:
     return {key: dict(value) for key, value in configs.items()}
 
 
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """Write ``data`` as JSON without ever leaving a torn/partial file on disk.
+
+    A plain ``open(path, "w")`` truncates immediately, so a crash mid-``json.dump``
+    (or a reader opening the file at that instant) sees invalid JSON. Writing to a
+    sibling temp file first and ``os.replace``-ing it in is atomic on POSIX --
+    readers always see either the old file or the fully-written new one.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(data, tmp_file, indent=2)
+            tmp_file.write("\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
+
+
 def save_tenant_config(
     tenant_config: dict[str, Any],
     path: Path = CONFIG_FILE,
 ) -> dict[str, str]:
-    """Validate and upsert one tenant config into the mock config database."""
-    normalized = normalize_config(tenant_config)
-    configs = load_tenant_configs(path)
-    configs[normalized["tenant_id"]] = normalized
+    """Validate and upsert one tenant config into the mock config database.
 
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(configs, file, indent=2)
-        file.write("\n")
+    Holds an exclusive ``flock`` across the whole read-modify-write. This
+    matters once more than one process can write concurrently (e.g. the
+    onboarding API alongside the Streamlit dashboard): without it, two writers
+    that both read before either writes will each write back a full-file copy
+    missing the other's change -- a silent lost update, not just a torn file.
+    The load must happen *inside* the lock; locking only around the write (with
+    an unlocked read beforehand, as this function used to do) does not prevent
+    that race.
+    """
+    normalized = normalize_config(tenant_config)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            configs = load_tenant_configs(path)
+            configs[normalized["tenant_id"]] = normalized
+            _atomic_write_json(path, configs)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
     return normalized
 

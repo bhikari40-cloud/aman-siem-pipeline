@@ -10,6 +10,7 @@ class ConfigStoreTests(unittest.TestCase):
         with self.subTest("new config file"):
             config_path = Path(self.id().replace(".", "_") + ".json")
             self.addCleanup(config_path.unlink, missing_ok=True)
+            self.addCleanup(config_path.with_suffix(".json.lock").unlink, missing_ok=True)
 
             saved = save_tenant_config(
                 {
@@ -62,6 +63,7 @@ class ConfigStoreTests(unittest.TestCase):
     def test_save_tenant_config_accepts_syslog_url(self) -> None:
         config_path = Path(self.id().replace(".", "_") + ".json")
         self.addCleanup(config_path.unlink, missing_ok=True)
+        self.addCleanup(config_path.with_suffix(".json.lock").unlink, missing_ok=True)
 
         saved = save_tenant_config(
             {
@@ -80,6 +82,7 @@ class ConfigStoreTests(unittest.TestCase):
     def test_load_tenant_configs_is_cached_until_file_changes(self) -> None:
         config_path = Path(self.id().replace(".", "_") + ".json")
         self.addCleanup(config_path.unlink, missing_ok=True)
+        self.addCleanup(config_path.with_suffix(".json.lock").unlink, missing_ok=True)
         config_path.write_text(
             '{"tenant-123": {"tenant_id": "tenant-123", "siem_type": "splunk", "webhook_url": "https://a.example", "auth_token": "one"}}',
             encoding="utf-8",
