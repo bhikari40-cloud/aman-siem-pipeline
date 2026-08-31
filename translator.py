@@ -160,6 +160,69 @@ def _to_gelf(alert: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ecs_fields(alert: dict[str, Any]) -> dict[str, Any]:
+    """Elastic Common Schema field names.
+
+    ``event.type`` has no "blocked" value in its fixed enum (use
+    "denied"); ``event.category`` has no "dns" value (use "network") --
+    both confirmed against ECS's allowed-values reference.
+    ``dns.question.registered_domain`` is an exact native match for our
+    root-domain field. ``event.severity`` is deliberately left unset: ECS
+    docs describe it as an open numeric field with no fixed scale ("up to
+    the implementer to keep values consistent") -- inventing a number
+    here risks colliding with whatever convention the customer's other
+    data sources already use for that same field.
+    """
+    src = alert.get("src_endpoint", {}) or {}
+    dst = alert.get("dst_endpoint", {}) or {}
+    query = alert.get("query", {}) or {}
+    blocked = alert.get("disposition") == "Blocked"
+
+    ecs: dict[str, Any] = {
+        "event": {
+            "type": ["denied"] if blocked else ["allowed"],
+            "category": ["network"],
+            "action": "blocked" if blocked else "allowed",
+        },
+    }
+
+    source: dict[str, Any] = {}
+    if src.get("ip"):
+        source["ip"] = src["ip"]
+    location = src.get("location") or {}
+    geo: dict[str, Any] = {}
+    if location.get("city"):
+        geo["city_name"] = location["city"]
+    if location.get("country"):
+        geo["country_name"] = location["country"]
+    if "lat" in location and "lon" in location:
+        geo["location"] = {"lat": location["lat"], "lon": location["lon"]}
+    if geo:
+        source["geo"] = geo
+    autonomous_system = src.get("autonomous_system") or {}
+    if autonomous_system.get("number"):
+        source["as"] = {"number": autonomous_system["number"]}
+        if autonomous_system.get("name"):
+            source["as"]["organization"] = {"name": autonomous_system["name"]}
+    if source:
+        ecs["source"] = source
+
+    if dst.get("ip"):
+        ecs["destination"] = {"ip": dst["ip"]}
+
+    question: dict[str, Any] = {}
+    if query.get("hostname"):
+        question["name"] = query["hostname"]
+    if query.get("root_domain"):
+        question["registered_domain"] = query["root_domain"]
+    if query.get("type"):
+        question["type"] = query["type"]
+    if question:
+        ecs["dns"] = {"question": question}
+
+    return ecs
+
+
 def format_for_siem(
     ocsf_data: dict[str, Any],
     siem_type: str,
