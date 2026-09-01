@@ -99,6 +99,26 @@ class DeliverToWebhookTests(unittest.TestCase):
         self.assertEqual(captured["data"], b"<34>1 line")
         self.assertTrue(captured["verify"])
 
+    def test_splunk_gets_splunk_auth_scheme_not_bearer(self) -> None:
+        # Real Splunk HEC 401s on "Bearer <token>" -- confirmed 2026-09-01
+        # against a live instance, see PROGRESS.md. Locks in the one
+        # per-SIEM exception documented in the module docstring.
+        captured: dict[str, Any] = {}
+
+        def fake_post(url: str, **kwargs: Any) -> MockResponse:
+            captured.update(kwargs)
+            return MockResponse(status_code=200)
+
+        tenant_config = {
+            "tenant_id": "tenant-splunk",
+            "siem_type": "splunk",
+            "webhook_url": "https://splunk.example/services/collector",
+            "auth_token": "secret",
+        }
+        deliver_to_webhook(tenant_config, "<34>1 line", post_func=fake_post)
+
+        self.assertEqual(captured["headers"]["Authorization"], "Splunk secret")
+
 
 class RunSimplePipelineTests(unittest.TestCase):
     def test_delivers_blocked_events_to_that_tenants_own_webhook(self) -> None:

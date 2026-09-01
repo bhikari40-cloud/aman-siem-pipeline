@@ -13,6 +13,18 @@ customer's own SIEM webhook, in ECS field names, framed as a single RFC 5424
 syslog line, over a plain HTTP POST -- no per-SIEM branching, no native-alert
 provisioning, no batching, no retry/DLQ.
 
+ONE EXCEPTION: THE LOGIN HEADER
+================================
+Real Splunk's HTTP Event Collector hard-requires "Authorization: Splunk
+<token>" -- this module's generic "Bearer <token>" default gets a flat 401
+from it, confirmed 2026-09-01 against a live instance (see PROGRESS.md).
+That's not a format/style choice we can defer the way native-alert
+formatting is; it's the one thing that decides whether a Splunk customer's
+data arrives at all. _AUTH_SCHEME_BY_SIEM is a single-entry exception for
+that one hard requirement -- every other siem_type, including any future
+one, still gets the same generic Bearer header. This does not reopen the
+no-per-SIEM-branching decision for message format, batching, or retries.
+
 A "webhook" is an HTTP(S) POST to a URL (TCP, gets a real status code back).
 That is NOT the same thing as orchestrator.send_syslog_udp, which opens a
 raw UDP socket with no delivery confirmation -- this module never touches
@@ -63,6 +75,11 @@ from orchestrator import log_line, should_deliver_event
 
 REQUEST_TIMEOUT_SECONDS = 10
 LOG_COUNT = 20
+
+# See "ONE EXCEPTION: THE LOGIN HEADER" in the module docstring -- Splunk is
+# the only siem_type whose auth scheme this module knows about; every other
+# key falls back to the generic Bearer header in deliver_to_webhook.
+_AUTH_SCHEME_BY_SIEM = {"splunk": "Splunk"}
 
 PostFunc = Callable[..., Any]
 
@@ -133,7 +150,8 @@ def deliver_to_webhook(
     headers = {"Content-Type": "text/plain"}
     auth_token = tenant_config.get("auth_token", "")
     if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
+        scheme = _AUTH_SCHEME_BY_SIEM.get(tenant_config.get("siem_type", ""), "Bearer")
+        headers["Authorization"] = f"{scheme} {auth_token}"
 
     return post_func(
         tenant_config["webhook_url"],

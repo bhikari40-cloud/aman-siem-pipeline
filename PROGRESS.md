@@ -85,12 +85,15 @@ module's `run_simple_pipeline` too, and it failed with a real `401`.
 correct for a truly generic webhook receiver, but real Splunk HEC rejects
 anything that isn't `Authorization: Splunk <token>`. Confirmed by isolating
 just the header against the same live instance (Bearer → 401, Splunk → 200).
-So today, a customer who picks "Splunk" during onboarding and gets routed
-through the currently-shipping simple pipeline will have every delivery
-fail. Not fixed here — `ecs_syslog_webhook.py`'s docstring states "no
-per-SIEM branching" as a deliberate design choice, and even a
-one-line auth-scheme exception to that is a scope call, not a bug fix to
-make unilaterally.
+
+**Fixed same day, Brian's call.** `ecs_syslog_webhook.py` now carries one
+documented exception to its own "no per-SIEM branching" rule:
+`_AUTH_SCHEME_BY_SIEM` sends `Authorization: Splunk <token>` when
+`siem_type == "splunk"`, `Bearer <token>` for everything else. Re-ran
+`run_simple_pipeline` against the same live Splunk instance that 401'd
+before the fix — `delivered=1, failed=0`. Regression test added
+(`test_splunk_gets_splunk_auth_scheme_not_bearer`). Message format,
+batching, and retries are unchanged — this is only about the login header.
 
 ### Phase 2 — Async core (NEXT)
 - Async HTTP delivery (`httpx.AsyncClient` / `asyncio`) — remove the
