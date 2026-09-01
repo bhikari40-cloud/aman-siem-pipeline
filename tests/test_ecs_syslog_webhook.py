@@ -119,6 +119,27 @@ class DeliverToWebhookTests(unittest.TestCase):
 
         self.assertEqual(captured["headers"]["Authorization"], "Splunk secret")
 
+    def test_datadog_gets_dd_api_key_header_not_authorization(self) -> None:
+        # Real Datadog Logs API only reads a header literally named
+        # DD-API-KEY -- it does not look at Authorization at all. Confirmed
+        # against Datadog's own published API contract, see PROGRESS.md.
+        captured: dict[str, Any] = {}
+
+        def fake_post(url: str, **kwargs: Any) -> MockResponse:
+            captured.update(kwargs)
+            return MockResponse(status_code=200)
+
+        tenant_config = {
+            "tenant_id": "tenant-datadog",
+            "siem_type": "datadog",
+            "webhook_url": "https://http-intake.logs.datadoghq.com/api/v2/logs",
+            "auth_token": "secret",
+        }
+        deliver_to_webhook(tenant_config, "<34>1 line", post_func=fake_post)
+
+        self.assertEqual(captured["headers"]["DD-API-KEY"], "secret")
+        self.assertNotIn("Authorization", captured["headers"])
+
 
 class RunSimplePipelineTests(unittest.TestCase):
     def test_delivers_blocked_events_to_that_tenants_own_webhook(self) -> None:

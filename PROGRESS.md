@@ -118,6 +118,44 @@ webhook receiver can actually receive data from today's shipping
 pipeline** — the other 7 catalog entries describe a real, tested, working
 format, just not one the currently-running pipeline produces.
 
+**Correction, 2026-09-01, same day.** That last conclusion was too
+pessimistic — it only checked whether each SIEM's *native* endpoint (the
+one `siem_catalog.py` lists, built for `orchestrator.py`'s full engine)
+would take plain text. It doesn't, but that isn't the only door in. Real
+per-vendor research (cited sources, not memory) found that Elastic
+(Logstash's `http` input, plain codec), Graylog (a separate "Raw HTTP"
+input, distinct from GELF HTTP), Sumo Logic (its HTTP Source takes the
+raw body directly), Datadog (`/api/v2/logs` accepts `Content-Type:
+text/plain`), and CrowdStrike Falcon LogScale (a Raw HEC endpoint,
+`Authorization: Bearer <token>` already matching this module's default)
+all have a genuine, documented way to accept exactly this wire format —
+just not the same URL `siem_catalog.py` currently lists for them. Only
+Wazuh (syslog listener is TCP/UDP only, no HTTP option; management API is
+config-only, not ingestion) and Microsoft Sentinel (Logs Ingestion API
+strictly requires DCR-shaped JSON) confirmed to have no direct path —
+both would need a customer-built relay.
+
+**Datadog fixed same day.** Its `/api/v2/logs` endpoint doesn't read
+`Authorization` at all — only a header literally named `DD-API-KEY`.
+`ecs_syslog_webhook.py`'s single-header-name assumption meant Datadog
+would 403 even though the endpoint itself accepts the exact format sent.
+Generalized `_AUTH_SCHEME_BY_SIEM` (word-before-the-token only) into
+`_AUTH_HEADER_BY_SIEM` (header name *and* value template), since Datadog's
+requirement isn't a different scheme on the same header, it's a different
+header entirely. Splunk's existing behavior is unchanged. Verified against
+Datadog's own published API contract (their generated API client declares
+`text/plain` as an accepted content type for this operation) and locked in
+with a unit test — **not** live-tested against a real Datadog account, the
+way Splunk was against Annie's real instance, since that would mean
+standing up a live Datadog account first.
+
+`docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx` has been
+rewritten twice since it was first added: once to drop the "two engines,
+verified/untested" framing entirely (a customer configuring their SIEM
+doesn't need to know that distinction exists), and again to replace
+generic "check your SIEM's docs" guidance with the real, cited,
+platform-specific steps above.
+
 ### Phase 2 — Async core (NEXT)
 - Async HTTP delivery (`httpx.AsyncClient` / `asyncio`) — remove the
   `ThreadPoolExecutor` ceiling; per-tenant asyncio queues for ordering with
