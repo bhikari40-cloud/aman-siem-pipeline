@@ -9,7 +9,7 @@ what's a prototype vs. real, what's left. This README goes deeper on *why*
 it's built this way and walks through a real event end to end; `HANDOFF.md`
 stays the short status summary.
 
-## Two things worth knowing before the rest of this makes sense
+## Two things worth knowing
 
 `tenant_configs.json` is the address book. Every alert this pipeline sends
 starts with the same question: which customer does this belong to, and
