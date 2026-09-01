@@ -146,7 +146,7 @@ SIEM_CATALOG: dict[str, SiemSpec] = {
                 "url_scheme": "https",
                 "url_example": "https://your-splunk-host:8088/services/collector",
                 "fields": [_TOKEN_FIELD],
-                "status": SiemStatus.UNTESTED,
+                "status": SiemStatus.VERIFIED,
                 "native_alerting": None,
                 "guidance_key": "splunk.http",
             },

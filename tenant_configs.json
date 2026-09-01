@@ -50,5 +50,13 @@
     "siem_type": "wazuh",
     "webhook_url": "syslog://10.2.10.200:514",
     "auth_token": "unused-syslog-has-no-auth"
+  },
+  "test-annie-splunk": {
+    "tenant_id": "test-annie-splunk",
+    "siem_type": "splunk",
+    "webhook_url": "https://10.2.10.200:8088/services/collector",
+    "auth_token": "mock-splunk-token",
+    "verify_ssl": false,
+    "_note": "Real Splunk HEC token (annie-splunk container, HTTP Event Collector) kept out of git -- set locally, not committed. Verified 2026-09-01 via orchestrator.py's full engine (translator.format_for_siem's 'Splunk <token>' auth + {\"event\": {...}} envelope) -- HEC returned {\"text\":\"Success\",\"code\":0}. See PROGRESS.md for the important caveat: ecs_syslog_webhook.py's simple pipeline does NOT work against this same real instance -- see that note before assuming Splunk works end to end for whatever's currently shipping."
   }
 }

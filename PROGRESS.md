@@ -66,6 +66,32 @@ raw ECS doc ──► normalize_to_ocsf ──► tenant isolation ──► blo
 - Live real run: 871 → delivered 85 (Splunk batched 3-in-1, Elastic 1-per-POST),
   failed 0, DLQ 0; one transient failure auto-recovered via retry.
 
+**2026-09-01 — Splunk verified against a real instance, and a real gap found in
+the currently-shipping pipeline.** `annie-splunk` (Splunk Enterprise in
+Docker on `10.2.10.200`, HEC enabled) was already running on Annie but never
+wired up or delivery-tested — `onboarding-app/backend/siem_catalog.py` still
+had Splunk's `http` transport marked `UNTESTED`. Created a real HEC token,
+ran `orchestrator.run_pipeline` (the full engine) against it for real:
+`translator.format_for_siem`'s `Authorization: Splunk <token>` header + the
+`{"event": {...}}` envelope delivered successfully — HEC returned
+`{"text":"Success","code":0}`, 1/1 delivered. Catalog status flipped to
+`VERIFIED`; a `test-annie-splunk` entry (mock token, real one kept local)
+added to `tenant_configs.json`, matching the Elastic/Wazuh/Graylog pattern.
+
+**Important — this does not verify `ecs_syslog_webhook.py`, the pipeline
+that's actually shipping.** Ran the same real Splunk instance through that
+module's `run_simple_pipeline` too, and it failed with a real `401`.
+`deliver_to_webhook` always sends `Authorization: Bearer <token>` — that's
+correct for a truly generic webhook receiver, but real Splunk HEC rejects
+anything that isn't `Authorization: Splunk <token>`. Confirmed by isolating
+just the header against the same live instance (Bearer → 401, Splunk → 200).
+So today, a customer who picks "Splunk" during onboarding and gets routed
+through the currently-shipping simple pipeline will have every delivery
+fail. Not fixed here — `ecs_syslog_webhook.py`'s docstring states "no
+per-SIEM branching" as a deliberate design choice, and even a
+one-line auth-scheme exception to that is a scope call, not a bug fix to
+make unilaterally.
+
 ### Phase 2 — Async core (NEXT)
 - Async HTTP delivery (`httpx.AsyncClient` / `asyncio`) — remove the
   `ThreadPoolExecutor` ceiling; per-tenant asyncio queues for ordering with
