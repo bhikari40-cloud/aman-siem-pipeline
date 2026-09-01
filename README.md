@@ -55,10 +55,17 @@ scope decision, not a limitation — more on that below.
 More precisely: a webhook means a plain HTTP(S) `POST` to a URL the
 customer supplies, with a bearer token they also supplied, and it gets a
 real status code back. `deliver_to_webhook` checks that status code to know
-delivery actually succeeded. That's different from `orchestrator.py`'s raw
-UDP syslog transport, used for native Wazuh/Graylog delivery, which opens a
-socket and gets no confirmation at all. Easy to mix the two up since both
-end up as a syslog-formatted line — only the transport differs.
+delivery actually succeeded. One exception to "bearer token": Splunk's HTTP
+Event Collector requires its own `Splunk <token>` header, not `Bearer` — a
+generic Bearer header gets a flat 401 from a real Splunk instance, confirmed
+live — so `deliver_to_webhook` looks up the right scheme for `siem_type ==
+"splunk"` and falls back to Bearer for everything else. That's the one
+per-SIEM detail this module knows about, and it's about the auth header
+only, not message format or batching. That's different from
+`orchestrator.py`'s raw UDP syslog transport, used for native Wazuh/Graylog
+delivery, which opens a socket and gets no confirmation at all. Easy to mix
+the two up since both end up as a syslog-formatted line — only the
+transport differs.
 
 A few things point at this design instead of a native integration per SIEM:
 
