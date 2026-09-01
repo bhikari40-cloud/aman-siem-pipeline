@@ -45,6 +45,25 @@ which functions, in what order.
 
 ## Why a webhook, and not a native SIEM integration
 
+In plain terms first: think of a webhook as one plain mailbox. The customer
+hands us one address (a URL) and one key (a token), and we mail our alert
+there, in a plain, universal format. The alternative — a "native
+integration" — means custom-wiring our alert directly into one specific
+SIEM product's own internal system, in that product's own special format,
+so it shows up as a polished, built-in alert inside that product's
+dashboard. That's real, ongoing work: it has to be built, and then kept
+working, separately for every SIEM product that exists — it doesn't scale
+to "any SIEM a customer happens to run."
+
+Right now, this pipeline deliberately does the mailbox version: deliver the
+raw alert to that one address, plainly formatted. Making it show up as a
+polished, native alert inside the customer's own SIEM is left to the
+customer's own setup — that's an explicit scope decision (see reason 1
+below), not something this pipeline is technically incapable of.
+
+Everything from here restates the same reasoning at the code level — same
+idea, in terms of actual files and functions.
+
 A **webhook**, in this repo, means exactly one thing: a plain HTTP(S) `POST`
 to a URL the customer supplies, with a bearer token they also supplied. That
 gets a real status code back, which is how `deliver_to_webhook` knows
@@ -62,11 +81,12 @@ webhook instead of building a native alert integration per SIEM:
    Aman's job; making it render as a native, correlated *alert* inside that
    SIEM's own UI is the customer's own configuration — unless that decision
    changes. `orchestrator.py` / `translator.py` already do the harder
-   version of this (real Splunk HEC events, Sentinel/Datadog envelopes,
-   Elastic/Wazuh NDJSON bulk, Wazuh/Graylog syslog with platform-specific
-   decoders) for a fixed list of `SUPPORTED_SIEMS`. That's a real,
-   larger commitment — a decoder or rule per platform, kept in sync as each
-   platform's ingestion format changes — and it's a separate engine on
+   version of this — each one wrapped in that specific product's own data
+   format (Splunk's HEC events, Sentinel/Datadog's envelopes, Elastic/Wazuh's
+   NDJSON bulk format, Wazuh/Graylog's syslog with a platform-specific
+   decoder) — for a fixed list of `SUPPORTED_SIEMS`. That's a real,
+   larger commitment — a format/decoder per platform, kept in sync as each
+   platform's own ingestion format changes — and it's a separate engine on
    purpose, not what's currently shipping.
 2. **A generic webhook is the lowest common denominator.** Every SIEM (and
    most other ingestion tooling) can receive an HTTP POST to a URL. Betting
