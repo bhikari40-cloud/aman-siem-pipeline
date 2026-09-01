@@ -14,21 +14,18 @@ the customer's own setup, not ours.**
 
 ## In plain terms, before the technical detail
 
-Two ideas explain most of the code, neither obvious from file names alone:
+`tenant_configs.json` is the address book — one entry per customer, holding
+where to send their alerts and how to get in. Every alert gets checked
+against it first; unknown customer, nothing gets sent. It's written under a
+file lock because two tools can save to it at once (the signup page, the
+internal dashboard), and without that lock one save can silently erase the
+other's change.
 
-- **`tenant_configs.json` is the address book.** One entry per customer,
-  holding where to send their alerts (webhook address) and how to get in
-  (access token). Every alert gets checked against this file first —
-  unknown customer means nothing gets sent. It's written under a file lock
-  because two tools can save to it at once (the signup page, the internal
-  dashboard); without the lock, one save can silently erase the other's
-  change.
-- **The signup link is a one-time claim ticket, not a plain ID.** The link
-  a customer gets contains a random token, not their real customer ID. It
-  works once — the moment they submit their webhook, the token is marked
-  used. A fake, expired, used, or revoked token all produce the exact same
-  generic "invalid link" error, on purpose, so nobody can use a failed
-  attempt to confirm a real token or customer exists.
+The signup link is a one-time claim ticket, not a plain ID. It contains a
+random token, not the customer's real ID, and works once — the moment they
+submit their webhook, it's marked used. A fake, expired, used, or revoked
+token all produce the exact same "invalid link" error, on purpose, so a
+failed attempt can't be used to confirm a real token or customer exists.
 
 Full technical walkthrough, with diagrams and a worked example: `README.md`.
 

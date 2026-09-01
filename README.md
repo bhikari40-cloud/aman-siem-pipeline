@@ -9,97 +9,77 @@ what's a prototype vs. real, what's left. This README goes deeper on *why*
 it's built this way and walks through a real event end to end; `HANDOFF.md`
 stays the short status summary.
 
-## Two things to understand before anything technical
+## Two things worth knowing before the rest of this makes sense
 
-The rest of this doc, and the code itself, leans hard on two ideas. Neither
-is obvious from a file name, so plain-language first:
+`tenant_configs.json` is the address book. Every alert this pipeline sends
+starts with the same question: which customer does this belong to, and
+where does their data go? One file answers both. One entry per customer,
+holding their webhook address, their access token, and which SIEM they run.
+Every alert gets checked against it before anything is sent. Unknown
+customer, nothing gets sent — no guessing, and no risk of one customer's
+data landing at another customer's address.
 
-**`tenant_configs.json` is the address book.** Every alert this pipeline
-sends starts with the same question: *which customer does this belong to,
-and where does their data go?* This one file answers both — one entry per
-customer, holding their webhook address, their access token, and which SIEM
-they run. Every single alert gets checked against this file before it goes
-anywhere. If the customer isn't in it, nothing is sent — no guessing, and no
-risk of one customer's data reaching another customer's address.
+The code around this file is careful for a reason. Two different tools can
+try to save to it at the same moment: the customer signup page and the
+internal dashboard. Without a lock, the second save silently overwrites the
+first one's change, and a customer's webhook disappears with no error
+anywhere. So a write takes an exclusive lock on the file, and saves to a
+temporary copy before swapping it in — a crash mid-save can't leave a
+broken file behind.
 
-That's also why the code that reads/writes this file is unusually careful
-about it. Two different tools can try to save to it at the same moment — the
-customer signup page, and the internal dashboard. Without a safeguard, the
-second save can silently erase the first one's change, and a customer's
-webhook disappears with no error anywhere. So every write locks the file
-first (only one writer touches it at a time) and writes to a temporary copy
-before swapping it in, so a crash mid-save can never leave a broken,
-half-written file behind.
+The signup link itself is a one-time claim ticket, not a plain ID. The link
+a customer receives contains a random token, not their actual customer ID.
+The moment they submit their webhook through it, that token is marked used
+and can't be reused. Try a fake token, an expired one, an already-used one,
+a revoked one — all four get back the exact same "this link is invalid"
+message. That's on purpose: the system never explains *why* a token failed,
+so a failed attempt can't be used to confirm a real customer or token
+exists.
 
-**The signup link is a one-time claim ticket, not a plain ID.** When a
-customer gets onboarded, they're sent a link containing a random token — not
-their actual customer ID. The moment they submit their webhook through that
-link, the token is marked used and can't be reused. If someone tries a
-token that's fake, expired, already used, or revoked, they all get back the
-exact same generic "this link is invalid" message. That's deliberate: the
-system never says *why* a token failed, so nobody can use failed attempts to
-confirm a real customer or token exists.
+## Why a webhook instead of a native SIEM integration
 
-Everything below restates these two ideas at the code level — which files,
-which functions, in what order.
+A webhook here is one plain mailbox. The customer hands over an address (a
+URL) and a key (a token), and this pipeline mails the alert there in a
+plain, shared format. Building a "native integration" instead means wiring
+the alert into one specific SIEM product's own internals, in that product's
+own format, so it shows up as a polished, built-in alert on that product's
+dashboard. Real work, and it has to be built and kept working separately
+for every SIEM product out there — it doesn't scale to "whatever SIEM a
+customer happens to run."
 
-## Why a webhook, and not a native SIEM integration
+This pipeline does the mailbox version, on purpose. Delivering the raw
+alert to that one address is the job here; making it look like a native
+alert inside the customer's own SIEM is left to their own setup. That's a
+scope decision, not a limitation — more on that below.
 
-In plain terms first: think of a webhook as one plain mailbox. The customer
-hands us one address (a URL) and one key (a token), and we mail our alert
-there, in a plain, universal format. The alternative — a "native
-integration" — means custom-wiring our alert directly into one specific
-SIEM product's own internal system, in that product's own special format,
-so it shows up as a polished, built-in alert inside that product's
-dashboard. That's real, ongoing work: it has to be built, and then kept
-working, separately for every SIEM product that exists — it doesn't scale
-to "any SIEM a customer happens to run."
+More precisely: a webhook means a plain HTTP(S) `POST` to a URL the
+customer supplies, with a bearer token they also supplied, and it gets a
+real status code back. `deliver_to_webhook` checks that status code to know
+delivery actually succeeded. That's different from `orchestrator.py`'s raw
+UDP syslog transport, used for native Wazuh/Graylog delivery, which opens a
+socket and gets no confirmation at all. Easy to mix the two up since both
+end up as a syslog-formatted line — only the transport differs.
 
-Right now, this pipeline deliberately does the mailbox version: deliver the
-raw alert to that one address, plainly formatted. Making it show up as a
-polished, native alert inside the customer's own SIEM is left to the
-customer's own setup — that's an explicit scope decision (see reason 1
-below), not something this pipeline is technically incapable of.
+A few things point at this design instead of a native integration per SIEM:
 
-Everything from here restates the same reasoning at the code level — same
-idea, in terms of actual files and functions.
-
-A **webhook**, in this repo, means exactly one thing: a plain HTTP(S) `POST`
-to a URL the customer supplies, with a bearer token they also supplied. That
-gets a real status code back, which is how `deliver_to_webhook` knows
-delivery actually succeeded. It is *not* the same thing as
-`orchestrator.py`'s raw UDP syslog transport (used for Wazuh/Graylog native
-delivery) — that opens a socket and gets no delivery confirmation at all.
-The two are easy to conflate because both eventually produce a
-syslog-formatted line; only the transport differs.
-
-Three reasons this pipeline pushes plain, generic data over a customer
-webhook instead of building a native alert integration per SIEM:
-
-1. **It's the scope decision, not a technical shortcut.** Per `HANDOFF.md`
-   and `ARCHITECTURE.md` §3.4: pushing the data to a customer's SIEM is
-   Aman's job; making it render as a native, correlated *alert* inside that
-   SIEM's own UI is the customer's own configuration — unless that decision
-   changes. `orchestrator.py` / `translator.py` already do the harder
-   version of this — each one wrapped in that specific product's own data
-   format (Splunk's HEC events, Sentinel/Datadog's envelopes, Elastic/Wazuh's
-   NDJSON bulk format, Wazuh/Graylog's syslog with a platform-specific
-   decoder) — for a fixed list of `SUPPORTED_SIEMS`. That's a real,
-   larger commitment — a format/decoder per platform, kept in sync as each
-   platform's own ingestion format changes — and it's a separate engine on
-   purpose, not what's currently shipping.
-2. **A generic webhook is the lowest common denominator.** Every SIEM (and
-   most other ingestion tooling) can receive an HTTP POST to a URL. Betting
-   on "POST this to a URL the customer owns" means this pipeline never needs
-   to know anything platform-specific about that customer's SIEM beyond the
-   URL and a token — unlike the native path, which has to keep a hand-built
-   mapping for every product it supports.
-3. **It reuses the already-tested core, it doesn't re-derive it.**
-   `should_deliver_event` (tenant isolation, then the blocked-only filter)
-   and `normalize_to_ocsf` (raw log → canonical OCSF alert) are the exact
-   same functions `orchestrator.py`'s full engine uses and already has tests
-   for. `ecs_syslog_webhook.py` only adds the two things that engine doesn't
-   have: a plain ECS-over-syslog line format, and a plain HTTP POST.
+- It matches the existing scope decision (`HANDOFF.md`, `ARCHITECTURE.md`
+  §3.4): pushing data to a customer's SIEM is Aman's job, and rendering it
+  as a native, correlated alert inside that SIEM's own UI is the customer's
+  configuration, unless that changes. `orchestrator.py`/`translator.py`
+  already do the harder version — wrapping each alert in a specific
+  product's own format (Splunk's HEC events, Sentinel/Datadog's envelopes,
+  Elastic/Wazuh's NDJSON bulk, Wazuh/Graylog's syslog with a platform
+  decoder) — for a fixed list of `SUPPORTED_SIEMS`. Real, ongoing work,
+  kept in sync as each platform's ingestion format changes. A separate
+  engine, and not what's shipping.
+- Every SIEM, and most other ingestion tooling, can receive a plain HTTP
+  POST — that's the lowest common denominator. This pipeline never needs to
+  know anything platform-specific beyond a URL and a token, where the
+  native path has to keep a hand-built mapping per product.
+- `should_deliver_event` and `normalize_to_ocsf` are the same functions
+  `orchestrator.py`'s full engine already uses and already has tests for.
+  `ecs_syslog_webhook.py` only adds what that engine doesn't have: a plain
+  ECS-over-syslog line, and a plain POST.
 
 ## How it works
 
@@ -204,19 +184,16 @@ alert = normalize_to_ocsf(raw_doc)
 ```
 
 Two things worth knowing about that line if you're reading it for the first
-time:
-
-- **`<34>`** is the RFC 5424 PRI value: `facility(4, security) * 8 +
-  level(2, critical)`. `translator._SEVERITY_TO_SYSLOG_LEVEL` is the same
-  severity→syslog-level table the full engine's UDP path already uses —
-  this module doesn't invent a second mapping.
-- **Everything after `- - - `** is JSON, not further syslog structure — the
-  `- - -` are the (unused) PROCID/MSGID/STRUCTURED-DATA fields RFC 5424
-  requires a placeholder for. `event.severity` is deliberately *not* one of
-  the ECS fields set here: ECS's own docs describe it as an open numeric
-  field with no fixed scale, so this pipeline carries severity only as the
-  plain top-level `"severity"` string instead of inventing an ECS
-  convention that doesn't exist.
+time. `<34>` is the RFC 5424 PRI value — `facility(4, security) * 8 +
+level(2, critical)` — using the same severity→syslog-level table the full
+engine's UDP path already uses (`translator._SEVERITY_TO_SYSLOG_LEVEL`), not
+a second mapping invented for this module. And everything after `- - - ` is
+JSON, not more syslog structure; the `- - -` are just the (unused)
+PROCID/MSGID/STRUCTURED-DATA placeholders RFC 5424 requires. `event.severity`
+is deliberately left out of that JSON: ECS's own docs describe it as an open
+numeric field with no fixed scale, so severity only carries as the plain
+top-level `"severity"` string instead of inventing an ECS convention that
+doesn't exist.
 
 One gotcha for anyone extending this file: `build_ecs_syslog_line` calls
 `translator._ecs_fields` and `translator._SEVERITY_TO_SYSLOG_LEVEL`
