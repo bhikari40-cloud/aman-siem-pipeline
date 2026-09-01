@@ -144,7 +144,13 @@ SIEM_CATALOG: dict[str, SiemSpec] = {
             "http": {
                 "key": "http",
                 "url_scheme": "https",
-                "url_example": "https://your-splunk-host:8088/services/collector",
+                # /services/collector/raw, not the bare /services/collector --
+                # the currently-shipping pipeline (ecs_syslog_webhook.py) posts
+                # a plain-text syslog line, and /services/collector is the
+                # JSON *event* endpoint: it 400s ("Invalid data format") on
+                # anything that isn't valid JSON. /raw is Splunk HEC's own
+                # unstructured-text endpoint. Confirmed live 2026-09-01.
+                "url_example": "https://your-splunk-host:8088/services/collector/raw",
                 "fields": [_TOKEN_FIELD],
                 "status": SiemStatus.VERIFIED,
                 "native_alerting": None,

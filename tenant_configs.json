@@ -57,6 +57,6 @@
     "webhook_url": "https://10.2.10.200:8088/services/collector",
     "auth_token": "mock-splunk-token",
     "verify_ssl": false,
-    "_note": "Real Splunk HEC token (annie-splunk container, HTTP Event Collector) kept out of git -- set locally, not committed. Verified 2026-09-01 via orchestrator.py's full engine (translator.format_for_siem's 'Splunk <token>' auth + {\"event\": {...}} envelope) -- HEC returned {\"text\":\"Success\",\"code\":0}. See PROGRESS.md for the important caveat: ecs_syslog_webhook.py's simple pipeline does NOT work against this same real instance -- see that note before assuming Splunk works end to end for whatever's currently shipping."
+    "_note": "Real Splunk HEC token (annie-splunk container, HTTP Event Collector) kept out of git -- set locally, not committed. This entry's webhook_url is the JSON *event* endpoint, deliberately -- it's what orchestrator.py's full engine needs (translator.format_for_siem's 'Splunk <token>' auth + {\"event\": {...}} envelope; HEC returned {\"text\":\"Success\",\"code\":0}, verified 2026-09-01). ecs_syslog_webhook.py -- the pipeline actually shipping -- needs the *different* /services/collector/raw endpoint instead (see siem_catalog.py's splunk.http comment) since it POSTs a plain-text syslog line, not JSON; pointed at this entry's /collector URL it 400s ('Invalid data format'). Both auth scheme and endpoint path are fixed in ecs_syslog_webhook.py/siem_catalog.py as of 2026-09-01 -- see PROGRESS.md."
   }
 }

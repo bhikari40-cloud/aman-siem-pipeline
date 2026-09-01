@@ -95,6 +95,29 @@ before the fix — `delivered=1, failed=0`. Regression test added
 (`test_splunk_gets_splunk_auth_scheme_not_bearer`). Message format,
 batching, and retries are unchanged — this is only about the login header.
 
+**Second Splunk bug found and fixed the same day.** `siem_catalog.py`'s
+Splunk `url_example` pointed at `/services/collector` — Splunk HEC's JSON
+*event* endpoint. The shipping pipeline sends plain text, and that endpoint
+400s on it (`"Invalid data format"`, confirmed live). Fixed to
+`/services/collector/raw`, HEC's unstructured-text endpoint, which is what
+`ecs_syslog_webhook.py` actually needs.
+
+**Bigger finding, not fixed, needs a decision.** Every other SIEM in
+`siem_catalog.py` (Elastic, Wazuh, Graylog, Sentinel, Datadog, Sumo Logic,
+CrowdStrike) has its `url_example` pointing at that vendor's *structured*
+ingestion endpoint (bulk NDJSON, GELF JSON, etc.) — built for
+`orchestrator.py`'s full engine, which is not what's currently shipping.
+`ecs_syslog_webhook.py` only ever sends one plain-text syslog line, to any
+URL. Splunk happens to also expose a raw-text endpoint, which is the only
+reason it works at all today. Confirmed the same rejection pattern
+Splunk's JSON endpoint gave (`400`, `"Invalid data format"`) is what any
+JSON/NDJSON/GELF-schema endpoint would give a non-JSON body — not
+independently re-tested against Elastic/Graylog's real instances, but the
+same reasoning applies. Practical effect: **only Splunk and a true generic
+webhook receiver can actually receive data from today's shipping
+pipeline** — the other 7 catalog entries describe a real, tested, working
+format, just not one the currently-running pipeline produces.
+
 ### Phase 2 — Async core (NEXT)
 - Async HTTP delivery (`httpx.AsyncClient` / `asyncio`) — remove the
   `ThreadPoolExecutor` ceiling; per-tenant asyncio queues for ordering with
