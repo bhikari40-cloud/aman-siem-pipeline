@@ -53,15 +53,17 @@ alert inside the customer's own SIEM is left to their own setup. That's a
 scope decision, not a limitation — more on that below.
 
 More precisely: a webhook means a plain HTTP(S) `POST` to a URL the
-customer supplies, with a bearer token they also supplied, and it gets a
-real status code back. `deliver_to_webhook` checks that status code to know
-delivery actually succeeded. One exception to "bearer token": Splunk's HTTP
-Event Collector requires its own `Splunk <token>` header, not `Bearer` — a
-generic Bearer header gets a flat 401 from a real Splunk instance, confirmed
-live — so `deliver_to_webhook` looks up the right scheme for `siem_type ==
-"splunk"` and falls back to Bearer for everything else. That's the one
-per-SIEM detail this module knows about, and it's about the auth header
-only, not message format or batching. That's different from
+customer supplies, with a login credential they also supplied, and it gets
+a real status code back. `deliver_to_webhook` checks that status code to
+know delivery actually succeeded. Two exceptions to the generic default
+(`Authorization: Bearer <token>`): Splunk's HTTP Event Collector requires
+its own `Authorization: Splunk <token>` header — a generic Bearer header
+gets a flat 401 from a real instance, confirmed live — and Datadog's Logs
+API doesn't read `Authorization` at all, only a header literally named
+`DD-API-KEY`. `_AUTH_HEADER_BY_SIEM` looks up the right header name and
+value for a known `siem_type` and falls back to the generic default for
+everything else. Still just the login header — message format, batching,
+and retries stay exactly as narrow as before. That's different from
 `orchestrator.py`'s raw UDP syslog transport, used for native Wazuh/Graylog
 delivery, which opens a socket and gets no confirmation at all. Easy to mix
 the two up since both end up as a syslog-formatted line — only the
@@ -88,6 +90,13 @@ A few things point at this design instead of a native integration per SIEM:
   `ecs_syslog_webhook.py` only adds what that engine doesn't have: a plain
   ECS-over-syslog line, and a plain POST.
 
+Which SIEMs can actually receive this today, concretely, per platform:
+`PROGRESS.md`'s 2026-09-01 entries and
+[`docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx`](./docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx)
+have the real, cited answer — most of them can, at a different endpoint
+than the one `siem_catalog.py` lists for their native format. Wazuh and
+Microsoft Sentinel are the two that need something in between.
+
 ## How it works
 
 ```mermaid
@@ -97,7 +106,7 @@ flowchart LR
     C -- "tenant_id not in tenant_configs.json" --> D1["dropped: unknown_tenant"]
     C -- "disposition != Blocked" --> D2["dropped: unblocked"]
     C -- "known tenant + blocked" --> E["build_ecs_syslog_line<br/>(ECS fields, RFC 5424 header)"]
-    E --> F["deliver_to_webhook<br/>HTTP POST, Bearer token"]
+    E --> F["deliver_to_webhook<br/>HTTP POST, login header"]
     F --> G[("Customer's own webhook URL<br/>(from tenant_configs.json)")]
 ```
 
@@ -184,7 +193,8 @@ alert = normalize_to_ocsf(raw_doc)
 
 `build_ecs_syslog_line(alert)` turns that into the exact line
 `deliver_to_webhook` POSTs as the request body (`Content-Type: text/plain`,
-`Authorization: Bearer <tenant's token>`):
+plus a login header — `Authorization: Bearer <tenant's token>` by default,
+with the two exceptions above):
 
 ```
 <34>1 2026-09-01T02:14:07.000Z aman-pipeline aman-dns - - - {"@timestamp":"2026-09-01T02:14:07.000Z","event":{"type":["denied"],"category":["network"],"action":"blocked"},"source":{"ip":"203.153.118.242"},"dns":{"question":{"name":"phishing-kit.example","type":"ANY"}},"severity":"Critical"}
@@ -234,6 +244,11 @@ severity or ECS field actually means.
   webhook URL/token through a one-time link (diagram above). This proves the
   pipeline can be driven by customer-submitted config. **It is not the real
   product surface** — see `HANDOFF.md` for what that means for production.
+- `docs/` — two Word docs: an architecture/backend-setup reference, and a
+  customer-facing guide for configuring a SIEM to receive this pipeline's
+  data. The customer guide is generated from `build_customer_siem_guide.py`
+  in the same folder — edit that script and re-run it, don't hand-edit the
+  `.docx`.
 
 ## Running it
 
@@ -257,3 +272,6 @@ python3 ecs_syslog_webhook.py --source synthetic --limit 20
   open issues (e.g. the tenant-mapping gap against real ClickHouse data,
   §6).
 - [`PROGRESS.md`](./PROGRESS.md) — phase-by-phase task history.
+- [`docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx`](./docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx)
+  — customer-facing setup guide, real per-SIEM steps, currently marked
+  DRAFT pending review.
