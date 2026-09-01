@@ -9,6 +9,40 @@ what's a prototype vs. real, what's left. This README goes deeper on *why*
 it's built this way and walks through a real event end to end; `HANDOFF.md`
 stays the short status summary.
 
+## Two things to understand before anything technical
+
+The rest of this doc, and the code itself, leans hard on two ideas. Neither
+is obvious from a file name, so plain-language first:
+
+**`tenant_configs.json` is the address book.** Every alert this pipeline
+sends starts with the same question: *which customer does this belong to,
+and where does their data go?* This one file answers both — one entry per
+customer, holding their webhook address, their access token, and which SIEM
+they run. Every single alert gets checked against this file before it goes
+anywhere. If the customer isn't in it, nothing is sent — no guessing, and no
+risk of one customer's data reaching another customer's address.
+
+That's also why the code that reads/writes this file is unusually careful
+about it. Two different tools can try to save to it at the same moment — the
+customer signup page, and the internal dashboard. Without a safeguard, the
+second save can silently erase the first one's change, and a customer's
+webhook disappears with no error anywhere. So every write locks the file
+first (only one writer touches it at a time) and writes to a temporary copy
+before swapping it in, so a crash mid-save can never leave a broken,
+half-written file behind.
+
+**The signup link is a one-time claim ticket, not a plain ID.** When a
+customer gets onboarded, they're sent a link containing a random token — not
+their actual customer ID. The moment they submit their webhook through that
+link, the token is marked used and can't be reused. If someone tries a
+token that's fake, expired, already used, or revoked, they all get back the
+exact same generic "this link is invalid" message. That's deliberate: the
+system never says *why* a token failed, so nobody can use failed attempts to
+confirm a real customer or token exists.
+
+Everything below restates these two ideas at the code level — which files,
+which functions, in what order.
+
 ## Why a webhook, and not a native SIEM integration
 
 A **webhook**, in this repo, means exactly one thing: a plain HTTP(S) `POST`

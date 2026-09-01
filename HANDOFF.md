@@ -12,6 +12,26 @@ scope, stated plainly: **we push the data to their webhook, in a standard
 format. Getting it to show up as a native "alert" in their SIEM's own UI is
 the customer's own setup, not ours.**
 
+## In plain terms, before the technical detail
+
+Two ideas explain most of the code, neither obvious from file names alone:
+
+- **`tenant_configs.json` is the address book.** One entry per customer,
+  holding where to send their alerts (webhook address) and how to get in
+  (access token). Every alert gets checked against this file first —
+  unknown customer means nothing gets sent. It's written under a file lock
+  because two tools can save to it at once (the signup page, the internal
+  dashboard); without the lock, one save can silently erase the other's
+  change.
+- **The signup link is a one-time claim ticket, not a plain ID.** The link
+  a customer gets contains a random token, not their real customer ID. It
+  works once — the moment they submit their webhook, the token is marked
+  used. A fake, expired, used, or revoked token all produce the exact same
+  generic "invalid link" error, on purpose, so nobody can use a failed
+  attempt to confirm a real token or customer exists.
+
+Full technical walkthrough, with diagrams and a worked example: `README.md`.
+
 ## What's actually proven
 
 `ecs_syslog_webhook.py`: for each blocked DNS event, builds one message —
