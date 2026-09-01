@@ -34,10 +34,30 @@ Full technical walkthrough, with diagrams and a worked example: `README.md`.
 `ecs_syslog_webhook.py`: for each blocked DNS event, builds one message —
 the event's fields in Elastic's own standard naming (ECS), wrapped as a
 syslog-formatted line — and sends it as a plain HTTP POST to that specific
-customer's webhook URL. Tested (67 tests, `python3 -m unittest discover -s
+customer's webhook URL. Tested (69 tests, `python3 -m unittest discover -s
 tests`), and verified for real: I generated a real one-time sign-up link,
 submitted a webhook through the actual running sign-up page, and confirmed
 the event arrived at that webhook correctly formatted.
+
+Since then, also verified against a real Splunk instance (not just the
+sign-up-page test above) — two real bugs turned up doing that, both fixed
+and covered by tests: the wrong login header (was sending a generic one
+Splunk rejects), and the wrong URL path (was pointing at Splunk's JSON
+endpoint, which 400s on the plain text this pipeline sends). Datadog had
+the same kind of login-header bug, fixed the same way, but not yet
+live-verified against a real Datadog account the way Splunk was. Real
+vendor research (cited sources, not guessing) found that Elastic, Graylog,
+Sumo Logic, and CrowdStrike Falcon LogScale can each receive this same
+format too, just at a different address than the "native" one
+`siem_catalog.py` lists for them. Wazuh and Microsoft Sentinel are the two
+that genuinely can't receive it directly — either needs a customer-built
+relay in front of it. Full detail: `PROGRESS.md`'s 2026-09-01 entries.
+
+A draft customer-facing setup guide now exists too:
+`docs/Aman-SIEM-Pipeline-Customer-SIEM-Configuration-Guide.docx`, with
+real, vendor-verified steps per SIEM. Marked DRAFT — nobody's reviewed it
+for customer-readiness yet, and it has no support-contact info in it since
+none was given to put there.
 
 ## Important — what's prototype vs. real
 
